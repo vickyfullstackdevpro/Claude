@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, Suspense, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import MediaPlayer from '@/components/MediaPlayer';
 import {
   Play,
@@ -14,6 +15,7 @@ import {
   ExternalLink,
   Film,
   Radio,
+  ClipboardPaste,
 } from 'lucide-react';
 
 interface MediaInfo {
@@ -24,16 +26,16 @@ interface MediaInfo {
   thumbnail: string | null;
 }
 
-export default function Home() {
+function PlayerContent() {
+  const searchParams = useSearchParams();
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [media, setMedia] = useState<MediaInfo | null>(null);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const handleResolve = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!url.trim()) return;
+  const resolveUrl = useCallback(async (targetUrl: string) => {
+    if (!targetUrl.trim()) return;
 
     setLoading(true);
     setError('');
@@ -44,7 +46,7 @@ export default function Home() {
       const res = await fetch('/api/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ url: targetUrl.trim() }),
       });
 
       const data = await res.json();
@@ -59,6 +61,37 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  // Handle URL passed via query param (e.g., from Android PWA Share Target or direct link: /?url=... or /?text=...)
+  useEffect(() => {
+    const queryUrl = searchParams.get('url') || searchParams.get('text');
+    if (queryUrl) {
+      // Find URL inside text if entire share text was passed
+      const match = queryUrl.match(/(https?:\/\/[^\s]+)/i);
+      const extracted = match ? match[1] : queryUrl;
+      setUrl(extracted);
+      resolveUrl(extracted);
+    }
+  }, [searchParams, resolveUrl]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    resolveUrl(url);
+  };
+
+  const handlePasteClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        const match = text.match(/(https?:\/\/[^\s]+)/i);
+        const target = match ? match[1] : text.trim();
+        setUrl(target);
+        resolveUrl(target);
+      }
+    } catch {
+      // Browser didn't grant clipboard read permission
+    }
   };
 
   const copyToClipboard = async () => {
@@ -68,7 +101,6 @@ export default function Home() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     } catch {
-      // Fallback
       setError('Unable to copy to clipboard.');
     }
   };
@@ -81,39 +113,47 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-start px-4 py-12 md:py-16 selection:bg-blue-500/30">
-      <div className="w-full max-w-4xl space-y-8">
+    <main className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-start px-4 py-8 md:py-16 selection:bg-blue-500/30">
+      <div className="w-full max-w-4xl space-y-6 md:space-y-8">
         {/* Header / Hero */}
         <div className="text-center space-y-3">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-semibold tracking-wide uppercase">
             <Sparkles className="w-3.5 h-3.5" />
-            Ad-Free Stream Extractor
+            Ad-Free Mobile & Web Player
           </div>
-          <h1 className="text-4xl md:text-5xl font-black tracking-tight bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-black tracking-tight bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">
             DiskWala Player & Bypasser
           </h1>
-          <p className="text-slate-400 text-sm md:text-base max-w-xl mx-auto">
-            Bypass popups, timers, and app redirects. Extract clean direct streams for immediate web playback and downloading.
+          <p className="text-slate-400 text-xs sm:text-sm md:text-base max-w-xl mx-auto">
+            Bypass popups, countdowns, and app redirects. Stream and download DiskWala media instantly.
           </p>
         </div>
 
         {/* Input Form Card */}
-        <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 md:p-6 shadow-xl backdrop-blur-sm">
-          <form onSubmit={handleResolve} className="flex flex-col sm:flex-row gap-3">
-            <div className="relative flex-1">
+        <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 sm:p-5 md:p-6 shadow-xl backdrop-blur-sm">
+          <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-3">
+            <div className="relative flex-1 flex items-center">
               <input
                 type="text"
                 required
                 placeholder="Paste DiskWala link (e.g., https://diskwala.com/...)"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                className="w-full px-4 py-3.5 bg-slate-950/80 border border-slate-800 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition text-sm md:text-base"
+                className="w-full px-4 py-3.5 pr-11 bg-slate-950/80 border border-slate-800 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition text-sm md:text-base"
               />
+              <button
+                type="button"
+                onClick={handlePasteClipboard}
+                title="Paste from clipboard"
+                className="absolute right-2.5 p-2 text-slate-400 hover:text-slate-200 active:text-white transition rounded-lg hover:bg-slate-800/80 cursor-pointer"
+              >
+                <ClipboardPaste className="w-4 h-4" />
+              </button>
             </div>
             <button
               type="submit"
               disabled={loading || !url.trim()}
-              className="flex items-center justify-center gap-2 px-7 py-3.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold rounded-xl transition shadow-lg shadow-blue-600/20 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              className="flex items-center justify-center gap-2 px-7 py-3.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold rounded-xl transition shadow-lg shadow-blue-600/20 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shrink-0"
             >
               {loading ? (
                 <>
@@ -129,9 +169,11 @@ export default function Home() {
             </button>
           </form>
 
-          {/* Helper notes */}
+          {/* Mobile Tip & Reset */}
           <div className="flex flex-wrap items-center justify-between gap-2 mt-4 pt-3 border-t border-slate-800/80 text-xs text-slate-400">
-            <span>Supports standard links, .m3u8 playlists, direct CDN links, and mirror domains.</span>
+            <span>
+              💡 <strong>Mobile tip:</strong> In Chrome, tap <span className="text-slate-300 font-medium">⋮ &gt; Install app</span> to add to your Home Screen.
+            </span>
             {media && (
               <button
                 onClick={resetForm}
@@ -157,7 +199,7 @@ export default function Home() {
 
         {/* Media Player Card */}
         {media && (
-          <div className="space-y-5 bg-slate-900/60 border border-slate-800 p-5 md:p-6 rounded-3xl shadow-2xl backdrop-blur-md">
+          <div className="space-y-5 bg-slate-900/60 border border-slate-800 p-4 sm:p-5 md:p-6 rounded-3xl shadow-2xl backdrop-blur-md">
             {/* Title & Media Type Badge */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-800/60">
               <div className="min-w-0">
@@ -229,5 +271,19 @@ export default function Home() {
         )}
       </div>
     </main>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400">
+          <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+        </div>
+      }
+    >
+      <PlayerContent />
+    </Suspense>
   );
 }
