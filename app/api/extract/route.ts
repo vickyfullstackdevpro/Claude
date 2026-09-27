@@ -34,14 +34,19 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => ({}));
     let rawUrl = body?.url;
 
+    console.log('[Extract API] Received extraction request with input:', rawUrl);
+
     if (!rawUrl || typeof rawUrl !== 'string') {
       return NextResponse.json({ error: 'Please provide a valid URL' }, { status: 400 });
     }
 
     rawUrl = rawUrl.trim();
 
-    // If user provided just an ID or partial path
-    if (/^[a-f0-9]{20,40}$/i.test(rawUrl)) {
+    // Extract URL if user passed extra text (e.g., from WhatsApp or Telegram share)
+    const urlMatch = rawUrl.match(/(https?:\/\/[^\s]+)/i);
+    if (urlMatch) {
+      rawUrl = urlMatch[1];
+    } else if (/^[a-f0-9]{20,40}$/i.test(rawUrl)) {
       rawUrl = `https://www.diskwala.com/app/${rawUrl}`;
     } else if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
       rawUrl = `https://${rawUrl}`;
@@ -53,6 +58,8 @@ export async function POST(request: Request) {
     } catch {
       return NextResponse.json({ error: 'Invalid URL format' }, { status: 400 });
     }
+
+    console.log('[Extract API] Normalized target URL:', rawUrl);
 
     // Direct stream link bypass (if user directly pasted a .mp4 or .m3u8 URL)
     if (parsedUrl.pathname.endsWith('.mp4') || parsedUrl.pathname.endsWith('.m3u8')) {
@@ -67,30 +74,40 @@ export async function POST(request: Request) {
       });
     }
 
-    // Strategy 1: Dedicated DiskWala Resolver Service (Handles /app/:id, /play/:id, etc.)
-    try {
-      const resolverController = new AbortController();
-      const resolverTimeout = setTimeout(() => resolverController.abort(), 8000);
+    let upstreamError = '';
 
-      const resolverRes = await fetch(
-        `https://thediskwala.com/api/diskwala-free?url=${encodeURIComponent(rawUrl)}`,
-        {
+    // Strategy 1: Dedicated DiskWala Resolvers (thediskwala.com & playdiskwala.in)
+    const resolverEndpoints = [
+      'https://thediskwala.com/api/diskwala-free?url=',
+      'https://playdiskwala.in/api/diskwala-free?url=',
+    ];
+
+    for (const endpoint of resolverEndpoints) {
+      try {
+        console.log(`[Extract API] Querying resolver: ${endpoint}`);
+        const resolverController = new AbortController();
+        const resolverTimeout = setTimeout(() => resolverController.abort(), 8000);
+
+        const resolverRes = await fetch(`${endpoint}${encodeURIComponent(rawUrl)}`, {
           headers: {
             'User-Agent':
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-            'Referer': 'https://thediskwala.com/',
+            'Referer': endpoint.startsWith('https://thediskwala.com')
+              ? 'https://thediskwala.com/'
+              : 'https://playdiskwala.in/',
             'Accept': 'application/json, text/plain, */*',
           },
           signal: resolverController.signal,
           cache: 'no-store',
-        }
-      );
-      clearTimeout(resolverTimeout);
+        });
+        clearTimeout(resolverTimeout);
 
-      if (resolverRes.ok) {
+        console.log(`[Extract API] Resolver status: ${resolverRes.status}`);
+
         const resolverData = await resolverRes.json().catch(() => null);
-        if (resolverData && resolverData.success && resolverData.url) {
+        if (resolverRes.ok && resolverData && resolverData.success && resolverData.url) {
           const isHls = resolverData.url.toLowerCase().includes('.m3u8');
+          console.log('[Extract API] Successfully resolved stream URL:', resolverData.url);
           return NextResponse.json({
             title: resolverData.title || 'DiskWala Media',
             streamUrl: resolverData.url,
@@ -98,13 +115,17 @@ export async function POST(request: Request) {
             mediaType: isHls ? 'hls' : 'mp4',
             thumbnail: resolverData.thumb || null,
           });
+        } else if (resolverData && resolverData.error) {
+          upstreamError = resolverData.error;
+          console.log(`[Extract API] Resolver error message: ${upstreamError}`);
         }
+      } catch (resolverErr) {
+        console.warn(`[Extract API] Resolver ${endpoint} failed:`, resolverErr);
       }
-    } catch {
-      // Continue to direct HTML scraping fallback
     }
 
     // Strategy 2: Direct HTML Scraping Fallback
+    console.log('[Extract API] Falling back to direct HTML scraping for:', rawUrl);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
 
@@ -248,18 +269,17 @@ export async function POST(request: Request) {
     }
 
     if (!streamUrl) {
-      return NextResponse.json(
-        {
-          error:
-            'Unable to extract direct stream. The file might be expired, private, deleted, or requires the official DiskWala app.',
-        },
-        { status: 404 }
-      );
+      const finalError = upstreamError
+        ? `DiskWala upstream error: ${upstreamError}`
+        : 'Unable to extract video stream. The file may have expired, been deleted by the uploader, or removed.';
+      console.log('[Extract API] Returning error to client:', finalError);
+      return NextResponse.json({ error: finalError }, { status: 404 });
     }
 
     const isHls = streamUrl.toLowerCase().includes('.m3u8');
     const mediaType: 'hls' | 'mp4' = isHls ? 'hls' : 'mp4';
 
+    console.log('[Extract API] Extraction successful for title:', title);
     return NextResponse.json({
       title,
       streamUrl,
@@ -269,6 +289,7 @@ export async function POST(request: Request) {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Internal Server Error';
+    console.error('[Extract API] Unexpected internal error:', err);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
